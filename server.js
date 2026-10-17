@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, { cors: { origin: '*' }, transports: ['websocket', 'polling'] });
 
 // Serves the newest LITEHORRORVn.html in /public, so new versions need no code changes.
 function latestGame() {
