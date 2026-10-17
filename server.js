@@ -1,6 +1,7 @@
-// LITEHORROR multiplayer server (step 1: houses, spawns, 9-player cap, player sync)
+// LITEHORROR multiplayer server (houses, spawns, 9-player cap, player sync)
 const express = require('express');
 const http = require('http');
+const fs = require('fs');
 const path = require('path');
 const { Server } = require('socket.io');
 
@@ -12,8 +13,21 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+// Serves the newest LITEHORRORVn.html in /public, so new versions need no code changes.
+function latestGame() {
+  const files = fs.readdirSync(path.join(__dirname, 'public'))
+    .filter(f => /^LITEHORRORV\d+\.html$/.test(f));
+  if (files.length === 0) return null;
+  files.sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10));
+  return files[files.length - 1];
+}
+
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'LITEHORRORV12.html')));
+app.get('/', (req, res) => {
+  const file = latestGame();
+  if (!file) return res.status(404).send('No LITEHORROR game file found in public/');
+  res.sendFile(path.join(__dirname, 'public', file));
+});
 app.get('/health', (req, res) => res.send('ok'));
 
 const houses = [];
@@ -37,6 +51,14 @@ function pickSpawn(h) {
   return best;
 }
 
+// Sends the house's scoreboard (most zombies killed first) to everyone in it.
+function broadcastScores(h) {
+  const list = [...h.players.values()]
+    .map(p => ({ id: p.id, name: p.name, kills: p.kills }))
+    .sort((a, b) => b.kills - a.kills);
+  io.to('house' + h.id).emit('scores', list);
+}
+
 io.on('connection', socket => {
   let house = null;
   const room = () => 'house' + house.id;
@@ -45,7 +67,7 @@ io.on('connection', socket => {
     if (house) return;
     house = findHouse();
     const spawn = pickSpawn(house);
-    const me = { id: socket.id, name: String(name || 'Player').slice(0, 16), spawn, x: 0, z: 0, yaw: 0 };
+    const me = { id: socket.id, name: String(name || 'Player').slice(0, 16), spawn, x: 0, z: 0, yaw: 0, kills: 0 };
     house.players.set(socket.id, me);
     socket.join(room());
     socket.emit('joined', {
@@ -53,6 +75,7 @@ io.on('connection', socket => {
       max: MAX_PLAYERS, players: [...house.players.values()]
     });
     socket.to(room()).emit('playerJoined', me);
+    broadcastScores(house);
   });
 
   socket.on('move', d => {
@@ -63,10 +86,27 @@ io.on('connection', socket => {
     socket.to(room()).volatile.emit('moved', { id: socket.id, x: p.x, z: p.z, yaw: p.yaw });
   });
 
+  socket.on('kill', () => {
+    if (!house) return;
+    const p = house.players.get(socket.id);
+    if (!p) return;
+    p.kills++;
+    broadcastScores(house);
+  });
+
+  socket.on('setSkin', url => {
+    if (!house) return;
+    const p = house.players.get(socket.id);
+    if (!p) return;
+    p.skin = (typeof url === 'string' && url.startsWith('data:image/') && url.length < 120000) ? url : null;
+    socket.to(room()).emit('skin', { id: socket.id, skin: p.skin });
+  });
+
   socket.on('disconnect', () => {
     if (!house) return;
     house.players.delete(socket.id);
     io.to(room()).emit('playerLeft', socket.id);
+    broadcastScores(house);
     if (house.players.size === 0) houses.splice(houses.indexOf(house), 1);
   });
 });
